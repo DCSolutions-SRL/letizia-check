@@ -57,3 +57,45 @@ window.api.onQr((data) => {
   qrEl.innerHTML = '';
   qrEl.appendChild(img);
 });
+
+// ========= Últimas Capturas =========
+const state = {
+  lastSticker: null,
+  lastImagen: null,
+};
+
+function showCapturesUI() {
+  const title = document.getElementById('qrTitle');
+  const qrBox = document.getElementById('qr');
+  const captures = document.getElementById('captures');
+  if (title) title.textContent = 'Últimas Capturas';
+  if (qrBox) qrBox.style.display = 'none';
+  if (captures) captures.style.display = 'block';
+}
+
+function setImgSrc(imgEl, filePath) {
+  if (!imgEl || !filePath) return;
+  // Preferimos file:// directo (permitido por CSP). Si falla, podríamos convertir a dataURL.
+  const src = filePath.startsWith('file://') ? filePath : `file:///${filePath.replace(/\\/g, '/')}`;
+  imgEl.src = src;
+}
+
+function renderCaptures() {
+  const imgSticker = document.getElementById('capSticker');
+  const imgImagen = document.getElementById('capImagen');
+  if (state.lastSticker) setImgSrc(imgSticker, state.lastSticker);
+  if (state.lastImagen) setImgSrc(imgImagen, state.lastImagen);
+}
+
+window.api.onReady(() => {
+  log('WhatsApp listo. Mostrando galería de capturas.');
+  showCapturesUI();
+  renderCaptures();
+});
+
+window.api.onCapture(({ path, label }) => {
+  log(`Nueva captura (${label}): ${path}`);
+  if (label === 'sticker') state.lastSticker = path;
+  if (label === 'imagen-final') state.lastImagen = path;
+  renderCaptures();
+});

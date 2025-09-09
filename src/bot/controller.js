@@ -27,6 +27,7 @@ class BotController {
     this.scheduler = null;
     this.browserPath = null; // gestionado por whatsapp-web.js/puppeteer internamente
   this.activeChatIds = new Set(); // JIDs que respondieron (c.us/lid)
+  this.lastMessageFrom = null; // último JID emisor objetivo
   }
   
   // Utilidad: normaliza texto para comparaciones flexibles (sin acentos, sin puntuación, colapsando espacios)
@@ -77,11 +78,13 @@ class BotController {
 
     this.client.on('ready', () => {
       this.sendToRenderer('success', 'Cliente de WhatsApp listo.');
+      this.sendToRenderer('whatsapp-ready', true);
     });
 
     // Log de mensajes entrantes a la UI
     this.client.on('message', (msg) => {
       const isTarget = TARGET_NUMBERS.has(getNumberFromJid(msg.from));
+      if (isTarget) this.lastMessageFrom = msg.from;
       this.sendToRenderer('message', {
         direction: 'in',
         from: msg.from,
@@ -221,7 +224,33 @@ class BotController {
     return composed;
   }
 
-  async takeAndSaveScreenshot(label) {
+  _jidVariants(jid) {
+    const num = getNumberFromJid(jid || '');
+    return [`${num}@c.us`, `${num}@lid`];
+  }
+
+  async ensureChatOpen(jid) {
+    if (!jid) return false;
+    const variants = this._jidVariants(jid);
+    for (const v of variants) {
+      try {
+        const chat = await this.client.getChatById(v);
+        if (chat) {
+          if (typeof chat.open === 'function') {
+            await chat.open();
+          } else if (typeof chat.sendSeen === 'function') {
+            await chat.sendSeen();
+          }
+          await new Promise(r => setTimeout(r, 400));
+          return true;
+        }
+      } catch (_) { /* ignore and try next */ }
+    }
+    return false;
+  }
+
+  async takeAndSaveScreenshot(label, opts = {}) {
+    const { chatJidToOpen } = opts;
     // usar la página activa del cliente WWebJS a través de puppeteer
     const pup = this.client.pupBrowser || this.client.pupPage?.browser?.();
     const page = this.client.pupPage || (this.client.pupBrowserPages ? this.client.pupBrowserPages[0] : null);
@@ -234,13 +263,20 @@ class BotController {
     } catch {}
     if (!activePage) throw new Error('No se pudo obtener la página de Puppeteer para captura.');
 
+    // Asegurar que el chat relevante esté abierto (especialmente en headless)
+    const targetToOpen = chatJidToOpen || this.lastMessageFrom;
+    try {
+      await this.ensureChatOpen(targetToOpen);
+    } catch {}
+
     const rawBuffer = await activePage.screenshot({ fullPage: true });
     const withTs = await this.overlayDateTimePng(rawBuffer);
     const now = new Date();
     const fname = `screenshot_${label}_${now.getFullYear()}${(now.getMonth()+1).toString().padStart(2,'0')}${now.getDate().toString().padStart(2,'0')}_${now.toTimeString().slice(0,8).replace(/:/g,'-')}.png`;
     const outPath = path.join(this.captureDir, fname);
-    fs.writeFileSync(outPath, withTs);
-    this.sendToRenderer('success', `Captura guardada en: ${outPath}`);
+  fs.writeFileSync(outPath, withTs);
+  this.sendToRenderer('success', `Captura guardada en: ${outPath}`);
+  this.sendToRenderer('capture', { path: outPath, label });
     return outPath;
   }
 
@@ -315,7 +351,7 @@ class BotController {
             '*¿Tenes la patente del auto?*'
           ]);
           await new Promise(res => setTimeout(res, 500));
-          await this.takeAndSaveScreenshot('respuesta-tenes-patente');
+          await this.takeAndSaveScreenshot('sticker');
           for (const chatId of this._getRecipients()) {
             await this.sendAndLog(chatId, 'SI');
           }
@@ -330,7 +366,11 @@ class BotController {
             await this.waitForText(step.waitFor.text);
           } else if (step.waitFor.type === 'media') {
             await this.waitForMedia(step.waitFor.mediaType, 65000, step.waitFor.errorMessage || null);
-            if (step.waitFor.mediaType === 'image') verifiedFinalImage = true;
+            if (step.waitFor.mediaType === 'image') {
+              verifiedFinalImage = true;
+              await new Promise(res => setTimeout(res, 400));
+              await this.takeAndSaveScreenshot('imagen-final');
+            }
           }
         }
 

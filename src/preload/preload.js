@@ -10,5 +10,7 @@ contextBridge.exposeInMainWorld('api', {
   onError: (cb) => ipcRenderer.on('error', (_e, data) => cb(data)),
   onSuccess: (cb) => ipcRenderer.on('success', (_e, data) => cb(data)),
   onMessage: (cb) => ipcRenderer.on('message', (_e, data) => cb(data)),
+  onReady: (cb) => ipcRenderer.on('whatsapp-ready', (_e, data) => cb(data)),
+  onCapture: (cb) => ipcRenderer.on('capture', (_e, data) => cb(data)),
   onQr: (cb) => ipcRenderer.on('qr', (_e, data) => cb(data)),
 });
