@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Letizia Check</title>
+    <style>
+      body { font-family: Arial, sans-serif; margin: 20px; }
+      .row { margin-bottom: 12px; }
+      #qr { width: 256px; height: 256px; border: 1px solid #ccc; display: flex; align-items: center; justify-content: center; }
+      #log { white-space: pre-wrap; background: #111; color: #0f0; padding: 10px; height: 200px; overflow: auto; }
+      button { margin-right: 8px; }
+      .ok { color: green; }
+      .err { color: red; }
+    </style>
+  </head>
+  <body>
+    <h1>Letizia Check</h1>
+    <div class="row">
+      <label><input type="checkbox" id="headless" /> Headless</label>
+      <button id="init">Iniciar sesión WhatsApp</button>
+    </div>
+    <div class="row">
+      <button id="selectDir">Seleccionar carpeta de capturas</button>
+      <span id="dirLabel"></span>
+    </div>
+    <div class="row">
+      <button id="runOnce">Ejecutar ahora</button>
+      <button id="start">Iniciar programación 30m</button>
+      <button id="stop">Detener programación</button>
+    </div>
+    <div class="row">
+      <div id="qr">QR aquí</div>
+    </div>
+    <div class="row">
+      <div id="log"></div>
+    </div>
+    <script src="renderer.js"></script>
+  </body>
+  </html>

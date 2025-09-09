@@ -1,0 +1,23 @@
+{
+  "name": "letizia-check",
+  "version": "1.0.0",
+  "description": "App Electron para automatizar cotización y verificaciones de WhatsApp",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "qrcode": "^1.5.4",
+    "sharp": "^0.33.4",
+    "whatsapp-web.js": "^1.25.0"
+  },
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^24.13.3"
+  }
+}
