@@ -9,6 +9,8 @@ const DEFAULT_ALERT_CHAT_ID = process.env.ALERT_CHAT_ID || '202284772376688@lid'
 const CHAT_IDS = (process.env.CHAT_IDS || '104977657778311@lid').split(',').map(s => s.trim());
 const getNumberFromJid = (jid) => (jid || '').toString().split('@')[0];
 const TARGET_NUMBERS = new Set(CHAT_IDS.map(getNumberFromJid));
+const OPEN_CHAT_TITLE = process.env.OPEN_CHAT_TITLE || 'La Caja';
+const ZOOM_PERCENT = parseFloat(process.env.ZOOM_PERCENT || '0.8');
 
 function nextHalfHourDate() {
   const now = new Date();
@@ -28,6 +30,7 @@ class BotController {
     this.browserPath = null; // gestionado por whatsapp-web.js/puppeteer internamente
   this.activeChatIds = new Set(); // JIDs que respondieron (c.us/lid)
   this.lastMessageFrom = null; // último JID emisor objetivo
+  this.lastChatTitle = null; // nombre visible del chat (si está disponible)
   }
   
   // Utilidad: normaliza texto para comparaciones flexibles (sin acentos, sin puntuación, colapsando espacios)
@@ -76,15 +79,27 @@ class BotController {
       }
     });
 
-    this.client.on('ready', () => {
+    this.client.on('ready', async () => {
       this.sendToRenderer('success', 'Cliente de WhatsApp listo.');
       this.sendToRenderer('whatsapp-ready', true);
+      // Aplicar zoom a la página para mejores capturas/encuadre
+      try { await this._applyZoomToPage(ZOOM_PERCENT); } catch (_) {}
     });
 
     // Log de mensajes entrantes a la UI
-    this.client.on('message', (msg) => {
+    this.client.on('message', async (msg) => {
       const isTarget = TARGET_NUMBERS.has(getNumberFromJid(msg.from));
-      if (isTarget) this.lastMessageFrom = msg.from;
+      if (isTarget) {
+        this.lastMessageFrom = msg.from;
+        this.activeChatIds.add(msg.from);
+        try {
+          const chat = await msg.getChat();
+          // nombre del chat para búsqueda por UI si hiciera falta
+          this.lastChatTitle = chat?.name || getNumberFromJid(msg.from);
+        } catch (_) {
+          this.lastChatTitle = getNumberFromJid(msg.from);
+        }
+      }
       this.sendToRenderer('message', {
         direction: 'in',
         from: msg.from,
@@ -229,6 +244,44 @@ class BotController {
     return [`${num}@c.us`, `${num}@lid`];
   }
 
+  // Mes en español con mayúscula inicial (Enero, Febrero, ...)
+  _spanishMonthName(date) {
+    const months = [
+      'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+      'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
+    ];
+    return months[date.getMonth()];
+  }
+
+  // Devuelve "Turno Mañana", "Turno Tarde" o "Turno Noche" según día y hora
+  _turnoFolder(date) {
+    const day = date.getDay(); // 0=Domingo, 6=Sábado
+    const isWeekend = (day === 0 || day === 6);
+    const h = date.getHours();
+    const m = date.getMinutes();
+    const minutes = h * 60 + m;
+    if (isWeekend) {
+      // Sábados y domingos
+      if (minutes < 8 * 60) return 'Turno Noche';          // 00:00 - 07:59
+      if (minutes < 16 * 60) return 'Turno Mañana';        // 08:00 - 15:59
+      return 'Turno Tarde';                                // 16:00 - 23:59
+    } else {
+      // Lunes a viernes
+      if (minutes < 9 * 60) return 'Turno Noche';          // 00:00 - 08:59
+      if (minutes < 18 * 60) return 'Turno Mañana';        // 09:00 - 17:59
+      return 'Turno Tarde';                                // 18:00 - 23:59
+    }
+  }
+
+  // HH:MM con padding; en Windows se reemplaza ':' por '-' para nombre de archivo válido
+  _timeForFilename(date) {
+    const hh = String(date.getHours()).padStart(2, '0');
+    const mm = String(date.getMinutes()).padStart(2, '0');
+    const raw = `${hh}:${mm}`;
+    // Evitar ':' en Windows
+    return process.platform === 'win32' ? raw.replace(/:/g, '-') : raw;
+  }
+
   async ensureChatOpen(jid) {
     if (!jid) return false;
     const variants = this._jidVariants(jid);
@@ -236,17 +289,135 @@ class BotController {
       try {
         const chat = await this.client.getChatById(v);
         if (chat) {
+          // Si existe chat.open(), úsalo primero
           if (typeof chat.open === 'function') {
-            await chat.open();
-          } else if (typeof chat.sendSeen === 'function') {
+            try { await chat.open(); } catch (_) {}
+          }
+          // Asegurar actividad
+          if (typeof chat.sendSeen === 'function') {
             await chat.sendSeen();
           }
-          await new Promise(r => setTimeout(r, 400));
-          return true;
+          await new Promise(r => setTimeout(r, 500));
+      // No devolvemos aún: también forzamos apertura por UI para garantizar el pane derecho
+      break;
         }
       } catch (_) { /* ignore and try next */ }
     }
-    return false;
+    // Forzar apertura por UI (robusto para headless y asegura el foco de conversación)
+    return this.forceOpenChatUI({ jid });
+  }
+
+  // Usa el buscador de la columna izquierda para abrir un chat por número o nombre
+  async openChatViaUiSearch(page, text) {
+    if (!text || !page) return false;
+    // Buscar el cuadro de búsqueda en la columna izquierda (contenteditable)
+    const boxes = await page.$$('div[role="textbox"][contenteditable="true"]');
+    let target = null;
+    let minX = Number.POSITIVE_INFINITY;
+    for (const el of boxes) {
+      const box = await el.boundingBox();
+      if (box && box.x < minX) {
+        minX = box.x;
+        target = el;
+      }
+    }
+    if (!target && boxes.length) target = boxes[0];
+    if (!target) return false;
+    await target.click({ clickCount: 3 }); // enfocar y seleccionar
+    // Limpiar y escribir
+    await page.keyboard.down('Control');
+    await page.keyboard.press('A');
+    await page.keyboard.up('Control');
+    await page.keyboard.type(String(text));
+    // Esperar a que aparezca el primer resultado y presionar Enter
+    await page.waitForTimeout(400);
+    await page.keyboard.press('Enter');
+    return true;
+  }
+
+  // Busca directamente en la lista y hace click por coincidencia de texto/título
+  async openChatByListTitle(page, title) {
+    if (!page || !title) return false;
+    const ok = await page.evaluate((needle) => {
+      const txt = String(needle).toLowerCase();
+      const candidates = Array.from(document.querySelectorAll('[role="grid"] [role="row"], [data-testid="cell-frame-container"], [role="listitem"]'));
+      function findClickable(el) {
+        return el.closest('[role="row"]') || el.closest('[role="listitem"]') || el;
+      }
+      for (const row of candidates) {
+        const content = (row.innerText || row.textContent || '').toLowerCase();
+        const titleAttr = (row.getAttribute && (row.getAttribute('title') || '')) || '';
+        if (content.includes(txt) || titleAttr.toLowerCase().includes(txt)) {
+          const clickEl = findClickable(row);
+          clickEl.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+          clickEl.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+          clickEl.click();
+          return true;
+        }
+      }
+      return false;
+    }, title);
+    return !!ok;
+  }
+
+  // Intenta varias estrategias para abrir el chat en la UI
+  async forceOpenChatUI({ jid, title } = {}) {
+    try {
+      const page = this.client.pupPage || (this.client.pupBrowser ? (await this.client.pupBrowser.pages())[0] : null);
+      if (!page) return false;
+      // Esperar a que cargue la columna izquierda
+      try { await page.waitForSelector('[role="grid"], [data-testid="chat-list"]', { timeout: 5000 }); } catch {}
+      const searchKey = getNumberFromJid(jid || '') || title || this.lastChatTitle || OPEN_CHAT_TITLE;
+      // Desactivar zoom temporalmente para evitar offsets de click
+      const shouldRestoreZoom = ZOOM_PERCENT && ZOOM_PERCENT !== 1;
+      if (shouldRestoreZoom) { try { await this._setZoomOnPage(page, 1); } catch {} }
+      // 1) Probamos con el buscador
+      await this.openChatViaUiSearch(page, searchKey);
+      await page.waitForTimeout(500);
+      // 2) Si no abrió, probamos clic directo por título en la lista
+      await this.openChatByListTitle(page, searchKey);
+      await page.waitForTimeout(500);
+      if (shouldRestoreZoom) { try { await this._setZoomOnPage(page, ZOOM_PERCENT); } catch {} }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // Aplica zoom a la página actual de WhatsApp Web (por ejemplo, 0.8 = 80%)
+  async _applyZoomToPage(factor = 0.8) {
+    try {
+      const page = this.client.pupPage || (this.client.pupBrowser ? (await this.client.pupBrowser.pages())[0] : null);
+      if (!page) return false;
+      const f = Math.max(0.3, Math.min(2, Number(factor) || 0.8));
+      await this._setZoomOnPage(page, f);
+      // Intento 2 (opcional): usar atajos de zoom del navegador (puede no funcionar en headless)
+      try {
+        await page.keyboard.down('Control');
+        if (f < 1) {
+          for (let i = 0; i < Math.round((1 - f) * 5); i++) await page.keyboard.press('-');
+        } else if (f > 1) {
+          for (let i = 0; i < Math.round((f - 1) * 5); i++) await page.keyboard.press('=');
+        }
+        await page.keyboard.up('Control');
+      } catch { /* ignore */ }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async _setZoomOnPage(page, factor) {
+    const f = Math.max(0.3, Math.min(2, Number(factor) || 1));
+    await page.evaluate((ff) => {
+      let st = document.getElementById('cp-zoom-style');
+      if (!st) {
+        st = document.createElement('style');
+        st.id = 'cp-zoom-style';
+        document.documentElement.appendChild(st);
+      }
+      st.textContent = `html{zoom:${ff}}`;
+    }, f);
   }
 
   async takeAndSaveScreenshot(label, opts = {}) {
@@ -264,19 +435,36 @@ class BotController {
     if (!activePage) throw new Error('No se pudo obtener la página de Puppeteer para captura.');
 
     // Asegurar que el chat relevante esté abierto (especialmente en headless)
-    const targetToOpen = chatJidToOpen || this.lastMessageFrom;
+    const targetToOpen = chatJidToOpen || this.lastMessageFrom || this._getRecipients()[0];
     try {
       await this.ensureChatOpen(targetToOpen);
+      // Garantizar apertura visual
+      await this.forceOpenChatUI({ jid: targetToOpen });
     } catch {}
 
     const rawBuffer = await activePage.screenshot({ fullPage: true });
     const withTs = await this.overlayDateTimePng(rawBuffer);
     const now = new Date();
-    const fname = `screenshot_${label}_${now.getFullYear()}${(now.getMonth()+1).toString().padStart(2,'0')}${now.getDate().toString().padStart(2,'0')}_${now.toTimeString().slice(0,8).replace(/:/g,'-')}.png`;
-    const outPath = path.join(this.captureDir, fname);
-  fs.writeFileSync(outPath, withTs);
-  this.sendToRenderer('success', `Captura guardada en: ${outPath}`);
-  this.sendToRenderer('capture', { path: outPath, label });
+    // Estructura: Mes/dia-mes-año/Turno (Mañana/Tarde/Noche)/
+    const monthFolder = this._spanishMonthName(now);
+    const dateFolder = `${String(now.getDate()).padStart(2, '0')}-${String(now.getMonth() + 1).padStart(2, '0')}-${now.getFullYear()}`;
+    const turnoFolder = this._turnoFolder(now);
+    const targetDir = path.join(this.captureDir, monthFolder, dateFolder, turnoFolder);
+    if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+
+    // Nombre: Sticker -> letizia-sticker-HH:MM.png ; Imagen -> letizia-doc-HH:MM.png
+    const isSticker = (label || '').toLowerCase().includes('sticker');
+    const baseName = isSticker ? 'letizia-sticker' : 'letizia-doc';
+    const timePart = this._timeForFilename(now);
+    const fileName = `${baseName}-${timePart}.png`;
+    const outPath = path.join(targetDir, fileName);
+    fs.writeFileSync(outPath, withTs);
+    // Nota informativa si en Windows se sustituyó ':'
+    if (process.platform === 'win32' && timePart.includes('-')) {
+      this.sendToRenderer('status', 'En Windows se reemplaza ":" por "-" en el nombre del archivo.');
+    }
+    this.sendToRenderer('success', `Captura guardada en: ${outPath}`);
+    this.sendToRenderer('capture', { path: outPath, label });
     return outPath;
   }
 
@@ -327,7 +515,10 @@ class BotController {
       ]
     };
 
-    // enviar mensaje inicial a todos los chats
+  // Abrir el chat principal en la UI antes de empezar (importante en headless)
+  try { await this.forceOpenChatUI({ jid: CHAT_IDS[0], title: OPEN_CHAT_TITLE }); } catch {}
+
+  // enviar mensaje inicial a todos los chats
   for (const chatId of CHAT_IDS) {
       await this.sendAndLog(chatId, SCENARIO.initialMessage);
     }
@@ -351,7 +542,7 @@ class BotController {
             '*¿Tenes la patente del auto?*'
           ]);
           await new Promise(res => setTimeout(res, 500));
-          await this.takeAndSaveScreenshot('sticker');
+          await this.takeAndSaveScreenshot('sticker', { chatJidToOpen: this._getRecipients()[0] });
           for (const chatId of this._getRecipients()) {
             await this.sendAndLog(chatId, 'SI');
           }
@@ -369,7 +560,7 @@ class BotController {
             if (step.waitFor.mediaType === 'image') {
               verifiedFinalImage = true;
               await new Promise(res => setTimeout(res, 400));
-              await this.takeAndSaveScreenshot('imagen-final');
+              await this.takeAndSaveScreenshot('imagen-final', { chatJidToOpen: this._getRecipients()[0] });
             }
           }
         }
@@ -379,12 +570,9 @@ class BotController {
       await this.sendAndLog(chatId, step.respond);
           }
         }
-        if (step.send) {
+         if (step.send) {
           for (const chatId of this._getRecipients()) {
       await this.sendAndLog(chatId, step.send);
-            if (step.send === 'empezar') {
-              await this.takeAndSaveScreenshot('empezar');
-            }
           }
         }
         if (step.delay) {
